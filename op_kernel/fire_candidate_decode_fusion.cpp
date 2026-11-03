@@ -79,10 +79,11 @@ private:
 extern "C" __global__ __aicore__ void fire_candidate_decode_fusion(
     GM_ADDR rawPred, GM_ADDR priors, GM_ADDR decoded,
     GM_ADDR workspace, GM_ADDR tiling) {
+    REGISTER_TILING_DEFAULT(FireCandidateDecodeFusionTilingData);
     GET_TILING_DATA(tilingData, tiling);
     (void)workspace;
 
-    if (tilingData.dtype == optiling::DTYPE_FP16) {
+    if (tilingData.dtype == FCD_DTYPE_FP16) {
         KernelFireCandidateDecodeFusion<half> op;
         op.Init(rawPred, priors, decoded, tilingData.batchSize, tilingData.candidateNum);
         op.Process();

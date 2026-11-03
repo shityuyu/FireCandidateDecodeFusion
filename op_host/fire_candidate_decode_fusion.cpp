@@ -42,7 +42,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     const uint32_t batchSize = static_cast<uint32_t>(rawPredShape.GetDim(0));
     const uint32_t candidateNum = static_cast<uint32_t>(rawPredShape.GetDim(1));
     const uint32_t dtype =
-        (rawPredType == ge::DT_FLOAT) ? DTYPE_FP32 : DTYPE_FP16;
+        (rawPredType == ge::DT_FLOAT) ? FCD_DTYPE_FP32 : FCD_DTYPE_FP16;
     uint32_t DT_RAW_PRED = static_cast<uint32_t>(rawPredType);
     ASCENDC_TPL_SEL_PARAM(context, DT_RAW_PRED);
 
@@ -67,16 +67,13 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
 
     FireCandidateDecodeFusionTilingData* tiling =
         context->GetTilingData<FireCandidateDecodeFusionTilingData>();
-    if (tiling == nullptr || context->GetRawTilingData() == nullptr) {
+    if (tiling == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    tiling->set_batchSize(batchSize);
-    tiling->set_candidateNum(candidateNum);
-    tiling->set_dtype(dtype);
-    tiling->set_coreNum(coreNum);
-    tiling->SaveToBuffer(context->GetRawTilingData()->GetData(),
-                         context->GetRawTilingData()->GetCapacity());
-    context->GetRawTilingData()->SetDataSize(tiling->GetDataSize());
+    tiling->batchSize = batchSize;
+    tiling->candidateNum = candidateNum;
+    tiling->dtype = dtype;
+    tiling->coreNum = coreNum;
 
     context->SetBlockDim(coreNum);
     size_t* workspaceSize = context->GetWorkspaceSizes(1);
