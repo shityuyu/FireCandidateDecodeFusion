@@ -17,9 +17,12 @@ public:
         uint32_t batchSize, uint32_t candidateNum) {
         this->batchSize = batchSize;
         this->candidateNum = candidateNum;
-        rawPredGm.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(rawPred));
-        priorsGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(priors));
-        decodedGm.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(decoded));
+        rawPredGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(rawPred), batchSize * candidateNum * 6);
+        priorsGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ float*>(priors), candidateNum * 5);
+        decodedGm.SetGlobalBuffer(
+            reinterpret_cast<__gm__ T*>(decoded), batchSize * candidateNum * 5);
     }
 
     __aicore__ inline void Process() {

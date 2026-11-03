@@ -2,7 +2,6 @@
 #include "tiling/platform/platform_ascendc.h"
 
 #include "../op_kernel/fire_candidate_decode_fusion_tiling.h"
-#include "../op_kernel/tiling_key_fire_candidate_decode_fusion.h"
 
 namespace optiling {
 
@@ -43,8 +42,6 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context) {
     const uint32_t candidateNum = static_cast<uint32_t>(rawPredShape.GetDim(1));
     const uint32_t dtype =
         (rawPredType == ge::DT_FLOAT) ? FCD_DTYPE_FP32 : FCD_DTYPE_FP16;
-    uint32_t DT_RAW_PRED = static_cast<uint32_t>(rawPredType);
-    ASCENDC_TPL_SEL_PARAM(context, DT_RAW_PRED);
 
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
