@@ -1,0 +1,14 @@
+# 编译产物
+build/
+*.so
+*.o
+*.a
+*.log
+
+# 本地测试数据
+data/
+*.bin
+
+# Python 缓存
+__pycache__/
+*.pyc
