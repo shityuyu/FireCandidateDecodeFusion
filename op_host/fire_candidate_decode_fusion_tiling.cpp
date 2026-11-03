@@ -4,15 +4,21 @@
 
 namespace optiling {
 
-constexpr uint32_t BLOCK_N = 256;      // 与 kernel 侧一致
-constexpr uint32_t MAX_CORE_NUM = 40;  // 核数上限（910B 单 die 20 核 / 910 32 核，留余量）
+constexpr uint32_t BLOCK_N = 256;          // 与 kernel 侧一致
+constexpr uint32_t FALLBACK_CORE_NUM = 20; // 平台查询失败时使用 910B 的安全核数
 
 static ge::graphStatus TilingFuncFireCandidateDecodeFusion(gert::TilingContext* context) {
     FireCandidateDecodeFusionTilingData tiling;
 
     // raw_pred: [B, N, 6]
     auto rawPredDesc = context->GetInputDesc(0);
+    if (rawPredDesc == nullptr) {
+        return ge::GRAPH_FAILED;
+    }
     auto rawPredShape = rawPredDesc->GetShape();
+    if (rawPredShape.GetDimNum() != 3) {
+        return ge::GRAPH_FAILED;
+    }
     uint32_t batchSize = static_cast<uint32_t>(rawPredShape.GetDim(0));
     uint32_t candidateNum = static_cast<uint32_t>(rawPredShape.GetDim(1));
 
@@ -21,13 +27,21 @@ static ge::graphStatus TilingFuncFireCandidateDecodeFusion(gert::TilingContext* 
                          ? optiling::DTYPE_FP32
                          : optiling::DTYPE_FP16;
 
-    // 核数：按候选块数确定，并夹在 [1, MAX_CORE_NUM]。
-    uint32_t coreNum = (candidateNum + BLOCK_N - 1) / BLOCK_N;
+    // 查询当前 SoC 可用的 AIV 核数，不能超过平台实际资源。
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    uint32_t maxCoreNum = ascendcPlatform.GetCoreNumAiv();
+    if (maxCoreNum == 0) {
+        maxCoreNum = FALLBACK_CORE_NUM;
+    }
+
+    // 核数：按候选块数确定，并夹在 [1, 实际 AIV 核数]。
+    uint32_t candidateBlocks = (candidateNum + BLOCK_N - 1) / BLOCK_N;
+    uint32_t coreNum = candidateBlocks;
     if (coreNum < 1) {
         coreNum = 1;
     }
-    if (coreNum > MAX_CORE_NUM) {
-        coreNum = MAX_CORE_NUM;
+    if (coreNum > maxCoreNum) {
+        coreNum = maxCoreNum;
     }
 
     tiling.set_batchSize(batchSize);

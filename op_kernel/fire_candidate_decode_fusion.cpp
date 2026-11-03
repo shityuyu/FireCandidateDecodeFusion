@@ -56,17 +56,29 @@ public:
         uint32_t coreNum = GetBlockNum();
         uint32_t coreId = GetBlockIdx();
 
-        // 按候选维度 n 分片，各 core 处理全部 batch 中的一段候选。
-        uint32_t perCore = (candidateNum + coreNum - 1) / coreNum;
-        uint32_t nStart = coreId * perCore;
-        if (nStart >= candidateNum) {
+        // 以完整候选块分核，保证 GM/UB 地址及 DataCopy 长度满足 32B 对齐。
+        uint32_t totalBlocks = (candidateNum + BLOCK_N - 1) / BLOCK_N;
+        uint32_t blocksPerCore = (totalBlocks + coreNum - 1) / coreNum;
+        uint32_t blockStart = coreId * blocksPerCore;
+        if (blockStart >= totalBlocks) {
             return;
         }
-        uint32_t nEnd = (candidateNum < nStart + perCore) ? candidateNum : (nStart + perCore);
+        uint32_t blockEnd = blockStart + blocksPerCore;
+        if (blockEnd > totalBlocks) {
+            blockEnd = totalBlocks;
+        }
 
-        for (uint32_t n0 = nStart; n0 < nEnd; n0 += BLOCK_N) {
-            uint32_t cnt = (nEnd - n0) < BLOCK_N ? (nEnd - n0) : BLOCK_N;
-            ProcessBlock(n0, cnt);
+        for (uint32_t blockId = blockStart; blockId < blockEnd; ++blockId) {
+            uint32_t n0 = blockId * BLOCK_N;
+            uint32_t cnt = candidateNum - n0;
+            if (cnt > BLOCK_N) {
+                cnt = BLOCK_N;
+            }
+            if (cnt == BLOCK_N) {
+                ProcessBlock(n0, cnt);
+            } else {
+                ProcessTailBlock(n0, cnt);
+            }
         }
     }
 
@@ -74,13 +86,17 @@ private:
     __aicore__ inline void ProcessBlock(uint32_t n0, uint32_t cnt) {
         // 1. priors 在所有 batch 间共享，只搬运 + 分离一次。
         DataCopy(priorF32, priorsGm[n0 * 5], cnt * 5);
+        PipeBarrier<PIPE_ALL>();
         SplitPriors(cnt);
+        PipeBarrier<PIPE_ALL>();
 
         // 2. 对每个 batch 独立搬运 raw_pred、计算、写回。
         for (uint32_t b = 0; b < batchSize; ++b) {
             LoadRaw(b, n0, cnt);
             SplitRaw(cnt);
+            PipeBarrier<PIPE_ALL>();
             Compute(cnt);
+            PipeBarrier<PIPE_ALL>();
             PackOutput(b, n0, cnt);
         }
     }
@@ -90,10 +106,12 @@ private:
         uint32_t offset = (b * candidateNum + n0) * 6;
         if constexpr (std::is_same<T, half>::value) {
             DataCopy(rawT, rawPredGm[offset], cnt * 6);
+            PipeBarrier<PIPE_ALL>();
             Cast(rawF32, rawT, RoundMode::CAST_NONE, cnt * 6);
         } else {
             DataCopy(rawF32, rawPredGm[offset], cnt * 6);
         }
+        PipeBarrier<PIPE_ALL>();
     }
 
     // 将交错布局 [cnt,5] 的 priors 分离为 5 个连续字段向量
@@ -124,7 +142,8 @@ private:
         Muls(t1, dst, -1.0f, cnt);   // t1 = -z
         Exp(t2, t1, cnt);            // t2 = exp(-z)
         Adds(t1, t2, 1.0f, cnt);     // t1 = 1 + exp(-z)
-        Reciprocal(dst, t1, cnt);    // dst = 1/(1+exp(-z))
+        Duplicate(t2, 1.0f, cnt);
+        Div(dst, t2, t1, cnt);       // fp32 精度要求下使用显式除法，避免近似倒数
     }
 
     __aicore__ inline void Compute(uint32_t cnt) {
@@ -169,6 +188,9 @@ private:
         }
 
         // ---- 尾块（不足 8 的部分）标量处理 ----
+        if (vecCnt < cnt) {
+            PipeBarrier<PIPE_ALL>();
+        }
         for (uint32_t i = vecCnt; i < cnt; ++i) {
             float sx = FcdSigmoid(tx.GetValue(i));
             float sy = FcdSigmoid(ty.GetValue(i));
@@ -197,6 +219,49 @@ private:
         }
     }
 
+    // 任务规格中的 N 均为 256 的倍数。该路径仅用于通用性兜底，避免尾部
+    // DataCopy 长度或 GM 偏移未按 32B 对齐。
+    __aicore__ inline void ProcessTailBlock(uint32_t n0, uint32_t cnt) {
+        for (uint32_t b = 0; b < batchSize; ++b) {
+            for (uint32_t i = 0; i < cnt; ++i) {
+                uint32_t candidate = n0 + i;
+                uint32_t rawOffset = (b * candidateNum + candidate) * 6;
+                uint32_t priorOffset = candidate * 5;
+
+                float tx = static_cast<float>(rawPredGm.GetValue(rawOffset + 0));
+                float ty = static_cast<float>(rawPredGm.GetValue(rawOffset + 1));
+                float tw = static_cast<float>(rawPredGm.GetValue(rawOffset + 2));
+                float th = static_cast<float>(rawPredGm.GetValue(rawOffset + 3));
+                float obj = FcdSigmoid(static_cast<float>(rawPredGm.GetValue(rawOffset + 4)));
+                float fire = FcdSigmoid(static_cast<float>(rawPredGm.GetValue(rawOffset + 5)));
+
+                float gx = priorsGm.GetValue(priorOffset + 0);
+                float gy = priorsGm.GetValue(priorOffset + 1);
+                float stride = priorsGm.GetValue(priorOffset + 2);
+                float anchorW = priorsGm.GetValue(priorOffset + 3);
+                float anchorH = priorsGm.GetValue(priorOffset + 4);
+
+                float sx = FcdSigmoid(tx);
+                float sy = FcdSigmoid(ty);
+                float sw = FcdSigmoid(tw);
+                float sh = FcdSigmoid(th);
+
+                float x = (2.0f * sx - 0.5f + gx) * stride;
+                float y = (2.0f * sy - 0.5f + gy) * stride;
+                float w = (2.0f * sw) * (2.0f * sw) * anchorW * stride;
+                float h = (2.0f * sh) * (2.0f * sh) * anchorH * stride;
+                float score = obj * fire;
+
+                uint32_t outOffset = (b * candidateNum + candidate) * 5;
+                decodedGm.SetValue(outOffset + 0, static_cast<T>(x));
+                decodedGm.SetValue(outOffset + 1, static_cast<T>(y));
+                decodedGm.SetValue(outOffset + 2, static_cast<T>(w));
+                decodedGm.SetValue(outOffset + 3, static_cast<T>(h));
+                decodedGm.SetValue(outOffset + 4, static_cast<T>(score));
+            }
+        }
+    }
+
     // 将计算结果 [x,y,w,h,fire_score] 重排回交错布局并写回 GM
     __aicore__ inline void PackOutput(uint32_t b, uint32_t n0, uint32_t cnt) {
         for (uint32_t i = 0; i < cnt; ++i) {
@@ -206,14 +271,17 @@ private:
             outF32.SetValue(i * 5 + 3, th.GetValue(i));
             outF32.SetValue(i * 5 + 4, objLogit.GetValue(i));
         }
+        PipeBarrier<PIPE_ALL>();
 
         uint32_t offset = (b * candidateNum + n0) * 5;
         if constexpr (std::is_same<T, half>::value) {
             Cast(outT, outF32, RoundMode::CAST_ROUND, cnt * 5);
+            PipeBarrier<PIPE_ALL>();
             DataCopy(decodedGm[offset], outT, cnt * 5);
         } else {
             DataCopy(decodedGm[offset], outF32, cnt * 5);
         }
+        PipeBarrier<PIPE_ALL>();
     }
 
 private:
