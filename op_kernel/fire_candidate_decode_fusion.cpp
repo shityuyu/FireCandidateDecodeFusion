@@ -1,4 +1,5 @@
 #include "kernel_operator.h"
+#include "fire_candidate_decode_fusion_tiling.h"
 
 using namespace AscendC;
 
